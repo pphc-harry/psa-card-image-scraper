@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psa-card-image-scraper"
+version = "0.1.0"
+description = "Download public high-resolution front/back images from PSA cert pages."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Renaiss" }]
+dependencies = ["requests>=2.31.0"]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.44.0"]
+test = ["pytest>=8.0.0"]
+
+[project.scripts]
+psa-image-scraper = "psa_image_scraper.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["psa_image_scraper*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
