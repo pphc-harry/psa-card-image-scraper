@@ -14,6 +14,7 @@ import requests
 
 
 PSA_CERT_URL = "https://www.psacard.com/cert/{cert}/psa"
+READER_CERT_URL = "https://r.jina.ai/http://https://www.psacard.com/cert/{cert}/psa"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -64,6 +65,9 @@ class ScrapeResult:
     images: list[DownloadedImage] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     candidate_urls: list[str] = field(default_factory=list)
+    fetcher: str | None = None
+    fetch_url: str | None = None
+    attempts: list[dict[str, object]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         data = {
@@ -75,6 +79,12 @@ class ScrapeResult:
         }
         if self.errors:
             data["errors"] = self.errors
+        if self.fetcher:
+            data["fetcher"] = self.fetcher
+        if self.fetch_url:
+            data["fetch_url"] = self.fetch_url
+        if self.attempts:
+            data["attempts"] = self.attempts
         return data
 
 
@@ -87,6 +97,10 @@ def extract_cert_number(value: str) -> str:
 
 def cert_url(cert: str) -> str:
     return PSA_CERT_URL.format(cert=cert)
+
+
+def reader_url(cert: str) -> str:
+    return READER_CERT_URL.format(cert=cert)
 
 
 def make_session(user_agent: str = DEFAULT_USER_AGENT) -> requests.Session:
@@ -104,6 +118,17 @@ def make_session(user_agent: str = DEFAULT_USER_AGENT) -> requests.Session:
 def fetch_html(url: str, session: requests.Session | None = None, timeout: float = 45) -> str:
     session = session or make_session()
     response = session.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response.text
+
+
+def fetch_reader_markdown(cert_or_url: str, session: requests.Session | None = None, timeout: float = 45) -> str:
+    session = session or make_session()
+    response = session.get(
+        reader_url(extract_cert_number(cert_or_url)),
+        timeout=timeout,
+        headers={"Accept": "text/plain,*/*;q=0.8"},
+    )
     response.raise_for_status()
     return response.text
 

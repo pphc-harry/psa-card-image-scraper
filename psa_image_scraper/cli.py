@@ -10,10 +10,13 @@ from typing import Callable
 
 from .scraper import (
     DEFAULT_USER_AGENT,
+    cert_url,
     download_cert_images,
     extract_cert_number,
     extract_cloudfront_image_urls,
+    fetch_reader_markdown,
     make_session,
+    reader_url,
 )
 
 SECURITY_VERIFICATION_MARKERS = (
@@ -77,6 +80,29 @@ def _write_zip(zip_path: Path, out_dir: Path, manifest_path: Path) -> None:
 def _looks_like_security_verification(html: str) -> bool:
     normalized = html.lower()
     return any(marker in normalized for marker in SECURITY_VERIFICATION_MARKERS)
+
+
+def _fetcher_plan(args: argparse.Namespace) -> list[str]:
+    if args.fetcher == "auto":
+        plan = ["reader", "direct"]
+        if _should_use_browser(args):
+            plan.append("browser")
+        return plan
+    return [args.fetcher]
+
+
+def _reader_fetcher(session, timeout: float, retries: int = 3, retry_delay: float = 2) -> Callable[[str], str]:
+    def fetch(url: str) -> str:
+        last_text = ""
+        for attempt in range(1, max(retries, 1) + 1):
+            last_text = fetch_reader_markdown(url, session=session, timeout=timeout)
+            if extract_cloudfront_image_urls(last_text):
+                return last_text
+            if attempt < retries and retry_delay > 0:
+                time.sleep(retry_delay)
+        return last_text
+
+    return fetch
 
 
 def _make_browser_fetcher(
@@ -173,6 +199,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delay", type=float, default=0.5, help="Delay between certs, in seconds. Default: 0.5")
     parser.add_argument("--timeout", type=float, default=45, help="HTTP timeout in seconds. Default: 45")
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="HTTP User-Agent header.")
+    parser.add_argument(
+        "--fetcher",
+        choices=["auto", "reader", "direct", "browser"],
+        default="auto",
+        help=(
+            "Page fetch route. Default: auto, which tries the public reader route first, "
+            "then direct PSA, then browser only when browser options are supplied."
+        ),
+    )
+    parser.add_argument("--reader-retries", type=int, default=3, help="Reader fetch retries when no image URL is found. Default: 3")
+    parser.add_argument("--reader-retry-delay", type=float, default=2, help="Delay between reader retries, in seconds. Default: 2")
     parser.add_argument("--browser", action="store_true", help="Render cert pages with Playwright before extraction.")
     parser.add_argument("--browser-headful", action="store_true", help="Open a visible browser window in browser mode.")
     parser.add_argument("--browser-channel", help='Playwright browser channel, for example "chrome".')
@@ -199,13 +236,87 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _should_use_browser(args: argparse.Namespace) -> bool:
     return bool(
-        args.browser
+        args.fetcher == "browser"
+        or args.browser
         or args.browser_headful
         or args.browser_channel
         or args.browser_user_data_dir
         or args.browser_wait_for_images
         or args.browser_verification_timeout
     )
+
+
+def _attempt_summary(result) -> dict[str, object]:
+    data: dict[str, object] = {
+        "fetcher": result.fetcher,
+        "status": result.status,
+        "images": len(result.images),
+    }
+    if result.fetch_url:
+        data["fetch_url"] = result.fetch_url
+    if result.errors:
+        data["errors"] = result.errors
+    return data
+
+
+def _download_with_fetcher(
+    fetcher: str,
+    item: str,
+    out_dir: Path,
+    *,
+    size: str,
+    session,
+    page_html: str | None,
+    reader_html_fetcher: Callable[[str], str],
+    browser_html_fetcher: Callable[[str], str] | None,
+    timeout: float,
+):
+    cert = extract_cert_number(item)
+    if fetcher == "saved-html":
+        result = download_cert_images(
+            item,
+            out_dir,
+            size=size,
+            session=session,
+            page_html=page_html,
+            timeout=timeout,
+        )
+        result.fetch_url = cert_url(cert)
+    elif fetcher == "reader":
+        result = download_cert_images(
+            item,
+            out_dir,
+            size=size,
+            session=session,
+            html_fetcher=reader_html_fetcher,
+            timeout=timeout,
+        )
+        result.fetch_url = reader_url(cert)
+    elif fetcher == "direct":
+        result = download_cert_images(
+            item,
+            out_dir,
+            size=size,
+            session=session,
+            timeout=timeout,
+        )
+        result.fetch_url = cert_url(cert)
+    elif fetcher == "browser":
+        if browser_html_fetcher is None:
+            raise RuntimeError("browser fetcher was not initialized")
+        result = download_cert_images(
+            item,
+            out_dir,
+            size=size,
+            session=session,
+            html_fetcher=browser_html_fetcher,
+            timeout=timeout,
+        )
+        result.fetch_url = cert_url(cert)
+    else:
+        raise ValueError(f"unknown fetcher: {fetcher}")
+    result.fetcher = fetcher
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -219,10 +330,12 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = Path(args.manifest)
     html_overrides = _read_html_overrides(args.html)
     session = make_session(args.user_agent)
-    html_fetcher = None
+    fetch_plan = _fetcher_plan(args)
+    reader_html_fetcher = _reader_fetcher(session, args.timeout, args.reader_retries, args.reader_retry_delay)
+    browser_html_fetcher = None
     close_browser = None
 
-    if _should_use_browser(args):
+    if "browser" in fetch_plan:
         try:
             verification_timeout = (
                 args.browser_verification_timeout
@@ -231,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
                 if args.browser_headful
                 else 0
             )
-            html_fetcher, close_browser = _make_browser_fetcher(
+            browser_html_fetcher, close_browser = _make_browser_fetcher(
                 args.timeout,
                 headless=not args.browser_headful,
                 user_data_dir=args.browser_user_data_dir,
@@ -247,17 +360,31 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for index, item in enumerate(items):
             cert = extract_cert_number(item)
-            result = download_cert_images(
-                item,
-                out_dir,
-                size=args.size,
-                session=session,
-                page_html=html_overrides.get(cert),
-                html_fetcher=html_fetcher,
-                timeout=args.timeout,
-            )
+            item_plan = ["saved-html"] if cert in html_overrides else fetch_plan
+            attempts = []
+            result = None
+            for fetcher in item_plan:
+                current_result = _download_with_fetcher(
+                    fetcher,
+                    item,
+                    out_dir,
+                    size=args.size,
+                    session=session,
+                    page_html=html_overrides.get(cert),
+                    reader_html_fetcher=reader_html_fetcher,
+                    browser_html_fetcher=browser_html_fetcher,
+                    timeout=args.timeout,
+                )
+                attempts.append(_attempt_summary(current_result))
+                if result is None or len(current_result.images) >= len(result.images):
+                    result = current_result
+                if current_result.status == "ok" or args.fetcher != "auto":
+                    break
+            if result is None:
+                raise RuntimeError(f"no fetcher attempts were run for {cert}")
+            result.attempts = attempts
             results.append(result)
-            print(f"{cert}: {result.status} ({len(result.images)} image(s))", file=sys.stderr)
+            print(f"{cert}: {result.status} via {result.fetcher} ({len(result.images)} image(s))", file=sys.stderr)
             if args.delay and index < len(items) - 1:
                 time.sleep(args.delay)
     finally:

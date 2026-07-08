@@ -2,7 +2,9 @@ from psa_image_scraper.scraper import (
     decode_page_text,
     extract_cert_number,
     extract_cloudfront_image_urls,
+    fetch_reader_markdown,
     image_dimensions,
+    reader_url,
     select_front_back_urls,
 )
 
@@ -40,6 +42,34 @@ def test_select_front_back_prefers_largest_asset_group():
 
 def test_decode_page_text_unescapes_common_page_encodings():
     assert decode_page_text("https:\\/\\/example.com\\/a\\u002Fb") == "https://example.com/a/b"
+
+
+def test_reader_url_builds_public_reader_endpoint():
+    assert reader_url("120224951") == "https://r.jina.ai/http://https://www.psacard.com/cert/120224951/psa"
+
+
+def test_fetch_reader_markdown_uses_reader_endpoint():
+    calls = []
+
+    class Response:
+        text = "reader markdown"
+
+        def raise_for_status(self):
+            return None
+
+    class Session:
+        def get(self, url, timeout, headers):
+            calls.append((url, timeout, headers))
+            return Response()
+
+    assert fetch_reader_markdown("https://www.psacard.com/cert/120224951/psa", session=Session(), timeout=12) == "reader markdown"
+    assert calls == [
+        (
+            "https://r.jina.ai/http://https://www.psacard.com/cert/120224951/psa",
+            12,
+            {"Accept": "text/plain,*/*;q=0.8"},
+        )
+    ]
 
 
 def test_png_dimensions():

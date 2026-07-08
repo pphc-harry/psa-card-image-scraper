@@ -3,9 +3,14 @@
 Download the public front/back certificate images from PSA cert pages at the
 highest public size currently exposed by the page, usually `large`.
 
-The scraper takes PSA cert numbers or PSA cert URLs, reads the public page,
+The scraper takes PSA cert numbers or PSA cert URLs, reads the public page data,
 extracts the CloudFront card image URLs, normalizes them to the requested size,
 downloads the images into one folder per cert, and writes a JSON manifest.
+
+By default it uses `--fetcher auto`: public reader route first, direct PSA page
+second, and browser fallback only when browser options are supplied. This is the
+recommended mode for batch jobs because it avoids asking you to complete PSA
+browser verification for every cert.
 
 ## Install
 
@@ -48,15 +53,33 @@ cat certs.txt
 psa-image-scraper --input certs.txt --out downloads --zip psa-images.zip
 ```
 
+The default `auto` mode is the batch-friendly route. For most lists, this is all
+you need:
+
+```bash
+psa-image-scraper --input certs.txt \
+  --out downloads \
+  --zip psa-images.zip
+```
+
+If you need to force a route:
+
+```bash
+psa-image-scraper --input certs.txt --fetcher reader --out downloads
+psa-image-scraper --input certs.txt --fetcher direct --out downloads
+psa-image-scraper --input certs.txt --fetcher browser --browser-headful --out downloads
+```
+
 Use Playwright if the page needs a rendered DOM:
 
 ```bash
-psa-image-scraper 136046059 --browser --out downloads
+psa-image-scraper 136046059 --fetcher browser --browser --out downloads
 ```
 
-If PSA returns `403 Forbidden`, use a visible browser with a persistent profile.
-This lets you complete any normal PSA/Cloudflare browser check once, then reuse
-the same browser cookies/session for the scrape:
+If the public reader route is temporarily missing a cert and PSA direct page
+fetching returns `403 Forbidden`, use a visible browser with a persistent
+profile as an auto fallback. You should normally complete the normal
+PSA/Cloudflare browser check once for the session, not once per cert:
 
 ```bash
 pip install -e ".[browser]"
@@ -112,6 +135,8 @@ Each manifest item includes:
 - source PSA URL
 - extracted CDN URLs
 - downloaded file path
+- fetcher route used: `reader`, `direct`, `browser`, or `saved-html`
+- fetch attempts made in auto mode
 - byte size and image dimensions
 - status: `ok`, `partial`, or `failed`
 
@@ -119,11 +144,11 @@ Each manifest item includes:
 
 - This tool only uses public PSA cert pages and public image URLs found on those pages.
 - It does not bypass authentication, paywalls, WAF, Cloudflare, or rate limits.
-- A `403` means PSA blocked the current network/session before the public image
-  URLs were visible. Try `--browser-headful --browser-user-data-dir .psa-browser-profile`
-  from the same machine/network that can open PSA normally.
+- Default `auto` mode tries the public reader route before direct PSA page
+  fetching. A `403` in direct mode means PSA blocked the current network/session
+  before the public image URLs were visible.
 - A Cloudflare "Verify you are human" page is expected on some networks. This
-  tool does not bypass it; in headful mode it waits while you complete the check
-  in the opened browser, then reuses the persistent profile on later runs.
+  tool does not bypass it; browser mode is only a fallback when reader/direct
+  routes cannot expose the public image URLs.
 - Be respectful with request volume. Use `--delay` for bulk jobs.
 - `large` is the highest public size seen on current PSA cert image URLs. Other labels such as `original`, `full`, or `xlarge` often return `404`.
