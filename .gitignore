@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.psa-browser-profile/
 dist/
 build/
 *.egg-info/

@@ -65,10 +65,17 @@ python -m playwright install chromium
 psa-image-scraper --input certs.txt \
   --browser-headful \
   --browser-user-data-dir .psa-browser-profile \
+  --browser-verification-timeout 300 \
   --browser-wait-for-images 120 \
   --out downloads \
   --zip psa-images.zip
 ```
+
+If a page opens with "Verify you are human", complete that check in the opened
+browser window and keep the browser open. The scraper waits for the page to
+finish loading the public PSA cert image URLs, then continues automatically.
+Use a larger value such as `--browser-verification-timeout 600` if you need more
+time to finish the check.
 
 If Playwright's bundled Chromium is unavailable but Chrome is installed:
 
@@ -77,6 +84,7 @@ psa-image-scraper --input certs.txt \
   --browser-headful \
   --browser-channel chrome \
   --browser-user-data-dir .psa-browser-profile \
+  --browser-verification-timeout 300 \
   --browser-wait-for-images 120 \
   --out downloads
 ```
@@ -114,5 +122,8 @@ Each manifest item includes:
 - A `403` means PSA blocked the current network/session before the public image
   URLs were visible. Try `--browser-headful --browser-user-data-dir .psa-browser-profile`
   from the same machine/network that can open PSA normally.
+- A Cloudflare "Verify you are human" page is expected on some networks. This
+  tool does not bypass it; in headful mode it waits while you complete the check
+  in the opened browser, then reuses the persistent profile on later runs.
 - Be respectful with request volume. Use `--delay` for bulk jobs.
 - `large` is the highest public size seen on current PSA cert image URLs. Other labels such as `original`, `full`, or `xlarge` often return `404`.

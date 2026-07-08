@@ -16,6 +16,16 @@ from .scraper import (
     make_session,
 )
 
+SECURITY_VERIFICATION_MARKERS = (
+    "verify you are human",
+    "performing security verification",
+    "checking if the site connection is secure",
+    "just a moment",
+    "cf-turnstile",
+    "cf_chl",
+    "challenges.cloudflare.com",
+)
+
 
 def _read_items(args: argparse.Namespace) -> list[str]:
     items = list(args.items)
@@ -64,12 +74,18 @@ def _write_zip(zip_path: Path, out_dir: Path, manifest_path: Path) -> None:
                 archive.write(path, path.relative_to(out_dir.parent))
 
 
+def _looks_like_security_verification(html: str) -> bool:
+    normalized = html.lower()
+    return any(marker in normalized for marker in SECURITY_VERIFICATION_MARKERS)
+
+
 def _make_browser_fetcher(
     timeout: float,
     *,
     headless: bool = True,
     user_data_dir: str | None = None,
     wait_for_images: float = 0,
+    verification_timeout: float = 0,
     channel: str | None = None,
 ) -> tuple[Callable[[str], str], Callable[[], None]]:
     try:
@@ -102,9 +118,36 @@ def _make_browser_fetcher(
                 pass
 
             deadline = time.monotonic() + max(wait_for_images, 0)
+            verification_deadline = time.monotonic() + max(verification_timeout, 0)
+            verification_notice_shown = False
             while True:
                 html = page.content()
-                if extract_cloudfront_image_urls(html) or time.monotonic() >= deadline:
+                if extract_cloudfront_image_urls(html):
+                    return html
+                now = time.monotonic()
+                if _looks_like_security_verification(html):
+                    if headless:
+                        raise RuntimeError(
+                            "PSA security verification is showing. Rerun with "
+                            "--browser-headful --browser-user-data-dir .psa-browser-profile."
+                        )
+                    if verification_timeout <= 0 or now >= verification_deadline:
+                        raise RuntimeError(
+                            "PSA security verification was not completed before timeout. "
+                            "Rerun with a larger --browser-verification-timeout and finish "
+                            "the Verify you are human check in the opened browser."
+                        )
+                    if not verification_notice_shown:
+                        print(
+                            "PSA security verification is showing in the browser. "
+                            "Complete the Verify you are human check there; scraper is waiting.",
+                            file=sys.stderr,
+                        )
+                        verification_notice_shown = True
+                    deadline = max(deadline, now + max(wait_for_images, 15))
+                    page.wait_for_timeout(1000)
+                    continue
+                if now >= deadline:
                     return html
                 page.wait_for_timeout(1000)
         finally:
@@ -140,6 +183,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="In browser mode, wait up to N seconds for PSA image URLs to appear after page load.",
     )
+    parser.add_argument(
+        "--browser-verification-timeout",
+        type=float,
+        default=None,
+        help=(
+            "In visible browser mode, wait up to N seconds for manual PSA/Cloudflare "
+            "human verification. Default: 300 when --browser-headful is used, else 0."
+        ),
+    )
     parser.add_argument("--html", action="append", help="Use saved HTML for one cert, format CERT=path.html. Repeatable.")
     parser.add_argument("--strict", action="store_true", help="Exit non-zero unless every cert has front and back images.")
     return parser
@@ -152,6 +204,7 @@ def _should_use_browser(args: argparse.Namespace) -> bool:
         or args.browser_channel
         or args.browser_user_data_dir
         or args.browser_wait_for_images
+        or args.browser_verification_timeout
     )
 
 
@@ -171,11 +224,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if _should_use_browser(args):
         try:
+            verification_timeout = (
+                args.browser_verification_timeout
+                if args.browser_verification_timeout is not None
+                else 300
+                if args.browser_headful
+                else 0
+            )
             html_fetcher, close_browser = _make_browser_fetcher(
                 args.timeout,
                 headless=not args.browser_headful,
                 user_data_dir=args.browser_user_data_dir,
                 wait_for_images=args.browser_wait_for_images,
+                verification_timeout=verification_timeout,
                 channel=args.browser_channel,
             )
         except Exception as exc:
