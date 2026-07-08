@@ -54,6 +54,33 @@ Use Playwright if the page needs a rendered DOM:
 psa-image-scraper 136046059 --browser --out downloads
 ```
 
+If PSA returns `403 Forbidden`, use a visible browser with a persistent profile.
+This lets you complete any normal PSA/Cloudflare browser check once, then reuse
+the same browser cookies/session for the scrape:
+
+```bash
+pip install -e ".[browser]"
+python -m playwright install chromium
+
+psa-image-scraper --input certs.txt \
+  --browser-headful \
+  --browser-user-data-dir .psa-browser-profile \
+  --browser-wait-for-images 120 \
+  --out downloads \
+  --zip psa-images.zip
+```
+
+If Playwright's bundled Chromium is unavailable but Chrome is installed:
+
+```bash
+psa-image-scraper --input certs.txt \
+  --browser-headful \
+  --browser-channel chrome \
+  --browser-user-data-dir .psa-browser-profile \
+  --browser-wait-for-images 120 \
+  --out downloads
+```
+
 Use saved HTML if direct page fetching is blocked:
 
 ```bash
@@ -84,5 +111,8 @@ Each manifest item includes:
 
 - This tool only uses public PSA cert pages and public image URLs found on those pages.
 - It does not bypass authentication, paywalls, WAF, Cloudflare, or rate limits.
+- A `403` means PSA blocked the current network/session before the public image
+  URLs were visible. Try `--browser-headful --browser-user-data-dir .psa-browser-profile`
+  from the same machine/network that can open PSA normally.
 - Be respectful with request volume. Use `--delay` for bulk jobs.
 - `large` is the highest public size seen on current PSA cert image URLs. Other labels such as `original`, `full`, or `xlarge` often return `404`.

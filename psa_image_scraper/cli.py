@@ -8,7 +8,13 @@ import zipfile
 from pathlib import Path
 from typing import Callable
 
-from .scraper import DEFAULT_USER_AGENT, download_cert_images, extract_cert_number, make_session
+from .scraper import (
+    DEFAULT_USER_AGENT,
+    download_cert_images,
+    extract_cert_number,
+    extract_cloudfront_image_urls,
+    make_session,
+)
 
 
 def _read_items(args: argparse.Namespace) -> list[str]:
@@ -58,27 +64,56 @@ def _write_zip(zip_path: Path, out_dir: Path, manifest_path: Path) -> None:
                 archive.write(path, path.relative_to(out_dir.parent))
 
 
-def _make_browser_fetcher(timeout: float) -> tuple[Callable[[str], str], Callable[[], None]]:
+def _make_browser_fetcher(
+    timeout: float,
+    *,
+    headless: bool = True,
+    user_data_dir: str | None = None,
+    wait_for_images: float = 0,
+    channel: str | None = None,
+) -> tuple[Callable[[str], str], Callable[[], None]]:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise RuntimeError('browser mode needs: pip install -e ".[browser]" && python -m playwright install chromium') from exc
 
     manager = sync_playwright().start()
-    browser = manager.chromium.launch(headless=True)
-    context = browser.new_context(user_agent=DEFAULT_USER_AGENT)
+    launch_options = {"headless": headless}
+    if channel:
+        launch_options["channel"] = channel
+    if user_data_dir:
+        browser = None
+        context = manager.chromium.launch_persistent_context(
+            str(Path(user_data_dir).expanduser()),
+            user_agent=DEFAULT_USER_AGENT,
+            **launch_options,
+        )
+    else:
+        browser = manager.chromium.launch(**launch_options)
+        context = browser.new_context(user_agent=DEFAULT_USER_AGENT)
 
     def fetch(url: str) -> str:
         page = context.new_page()
         try:
-            page.goto(url, wait_until="networkidle", timeout=int(timeout * 1000))
-            return page.content()
+            page.goto(url, wait_until="domcontentloaded", timeout=int(timeout * 1000))
+            try:
+                page.wait_for_load_state("networkidle", timeout=min(int(timeout * 1000), 15_000))
+            except Exception:
+                pass
+
+            deadline = time.monotonic() + max(wait_for_images, 0)
+            while True:
+                html = page.content()
+                if extract_cloudfront_image_urls(html) or time.monotonic() >= deadline:
+                    return html
+                page.wait_for_timeout(1000)
         finally:
             page.close()
 
     def close() -> None:
         context.close()
-        browser.close()
+        if browser:
+            browser.close()
         manager.stop()
 
     return fetch, close
@@ -96,9 +131,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=45, help="HTTP timeout in seconds. Default: 45")
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT, help="HTTP User-Agent header.")
     parser.add_argument("--browser", action="store_true", help="Render cert pages with Playwright before extraction.")
+    parser.add_argument("--browser-headful", action="store_true", help="Open a visible browser window in browser mode.")
+    parser.add_argument("--browser-channel", help='Playwright browser channel, for example "chrome".')
+    parser.add_argument("--browser-user-data-dir", help="Persistent browser profile directory for cookies/session reuse.")
+    parser.add_argument(
+        "--browser-wait-for-images",
+        type=float,
+        default=0,
+        help="In browser mode, wait up to N seconds for PSA image URLs to appear after page load.",
+    )
     parser.add_argument("--html", action="append", help="Use saved HTML for one cert, format CERT=path.html. Repeatable.")
     parser.add_argument("--strict", action="store_true", help="Exit non-zero unless every cert has front and back images.")
     return parser
+
+
+def _should_use_browser(args: argparse.Namespace) -> bool:
+    return bool(
+        args.browser
+        or args.browser_headful
+        or args.browser_channel
+        or args.browser_user_data_dir
+        or args.browser_wait_for_images
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,9 +169,15 @@ def main(argv: list[str] | None = None) -> int:
     html_fetcher = None
     close_browser = None
 
-    if args.browser:
+    if _should_use_browser(args):
         try:
-            html_fetcher, close_browser = _make_browser_fetcher(args.timeout)
+            html_fetcher, close_browser = _make_browser_fetcher(
+                args.timeout,
+                headless=not args.browser_headful,
+                user_data_dir=args.browser_user_data_dir,
+                wait_for_images=args.browser_wait_for_images,
+                channel=args.browser_channel,
+            )
         except Exception as exc:
             print(f"browser setup failed: {exc}", file=sys.stderr)
             return 2
